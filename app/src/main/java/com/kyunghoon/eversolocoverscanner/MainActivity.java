@@ -1,23 +1,21 @@
 package com.kyunghoon.eversolocoverscanner;
 
+import android.app.Activity;
 import android.content.Intent;
+import android.database.Cursor;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.DocumentsContract;
 import android.widget.TextView;
 
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.documentfile.provider.DocumentFile;
-
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.Executors;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends Activity {
     private static final int PICK_TREE = 1001;
 
     private TextView status;
@@ -54,27 +52,37 @@ public class MainActivity extends AppCompatActivity {
         super.onActivityResult(req, res, data);
         if (req != PICK_TREE || res != RESULT_OK || data == null || data.getData() == null) return;
 
-        Uri uri = data.getData();
+        Uri treeUri = data.getData();
 
         try {
             getContentResolver().takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION
             );
         } catch (Exception ignored) {}
 
         status.setText("스캔 중… 원본 파일은 수정하지 않습니다.");
         result.setText("");
 
-        Executors.newSingleThreadExecutor().execute(() -> scan(uri));
+        Executors.newSingleThreadExecutor().execute(() -> scan(treeUri));
     }
 
     private void scan(Uri treeUri) {
-        DocumentFile root = DocumentFile.fromTreeUri(this, treeUri);
         Stats s = new Stats();
 
-        if (root != null) walk(root, s);
+        try {
+            String rootId = DocumentsContract.getTreeDocumentId(treeUri);
+            scanDirectory(treeUri, rootId, s);
+        } catch (Exception e) {
+            s.fatal = e.getClass().getSimpleName() + ": " + e.getMessage();
+        }
 
         runOnUiThread(() -> {
+            if (s.fatal != null) {
+                status.setText("스캔 실패");
+                result.setText("Error: " + s.fatal);
+                return;
+            }
+
             status.setText("스캔 완료");
             result.setText(
                     "Audio tracks: " + s.audio + "\n" +
@@ -83,63 +91,73 @@ public class MainActivity extends AppCompatActivity {
                     "Embedded artwork detected: " + s.embedded + "\n" +
                     "No cover detected: " + s.missing + "\n" +
                     "Unable to inspect embedded art: " + s.unknown + "\n\n" +
-                    "※ v0.1은 읽기 전용입니다. 삭제/이동/태그수정/커버저장을 하지 않습니다."
+                    "※ v0.1.1은 읽기 전용입니다. 삭제/이동/태그수정/커버저장을 하지 않습니다."
             );
         });
     }
 
-    private void walk(DocumentFile dir, Stats s) {
-        DocumentFile[] kids;
-        try {
-            kids = dir.listFiles();
-        } catch (Exception e) {
-            return;
-        }
+    private void scanDirectory(Uri treeUri, String parentDocumentId, Stats s) {
+        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                treeUri, parentDocumentId
+        );
 
         boolean folderHasAudio = false;
-        boolean external = false;
-        List<DocumentFile> audios = new ArrayList<>();
+        boolean externalCover = false;
+        boolean embeddedFound = false;
+        boolean unknownFound = false;
+        long localAudioCount = 0;
 
-        for (DocumentFile f : kids) {
-            if (f.isDirectory()) {
-                walk(f, s);
-                continue;
+        try (Cursor c = getContentResolver().query(
+                childrenUri,
+                new String[] {
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE
+                },
+                null, null, null
+        )) {
+            if (c == null) return;
+
+            while (c.moveToNext()) {
+                String docId = c.getString(0);
+                String name = c.getString(1);
+                String mime = c.getString(2);
+
+                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
+                    scanDirectory(treeUri, docId, s);
+                    continue;
+                }
+
+                String lower = name == null ? "" : name.toLowerCase(Locale.ROOT);
+
+                if (coverNames.contains(lower)) {
+                    externalCover = true;
+                }
+
+                if (audioExt.contains(extension(lower))) {
+                    folderHasAudio = true;
+                    localAudioCount++;
+
+                    if (!embeddedFound) {
+                        Uri fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
+                        int r = hasEmbedded(fileUri);
+                        if (r == 1) embeddedFound = true;
+                        else if (r < 0) unknownFound = true;
+                    }
+                }
             }
-
-            String n = f.getName() == null ? "" : f.getName().toLowerCase(Locale.ROOT);
-
-            if (coverNames.contains(n)) external = true;
-
-            if (audioExt.contains(extension(n))) {
-                audios.add(f);
-                folderHasAudio = true;
-            }
+        } catch (Exception e) {
+            return;
         }
 
         if (!folderHasAudio) return;
 
         s.audioFolders++;
-        s.audio += audios.size();
+        s.audio += localAudioCount;
 
-        if (external) {
-            s.externalCoverFolders++;
-            return;
-        }
-
-        boolean anyEmbedded = false;
-        boolean anyUnknown = false;
-
-        for (DocumentFile a : audios) {
-            int r = hasEmbedded(a.getUri());
-            if (r == 1) {
-                anyEmbedded = true;
-                break;
-            }
-            if (r < 0) anyUnknown = true;
-        }
-
-        if (anyEmbedded) s.embedded++;
-        else if (anyUnknown) s.unknown++;
+        if (externalCover) s.externalCoverFolders++;
+        else if (embeddedFound) s.embedded++;
+        else if (unknownFound) s.unknown++;
         else s.missing++;
     }
 
@@ -168,5 +186,6 @@ public class MainActivity extends AppCompatActivity {
         long embedded = 0;
         long missing = 0;
         long unknown = 0;
+        String fatal = null;
     }
 }
