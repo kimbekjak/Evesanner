@@ -8,12 +8,7 @@ android {
         applicationId = "com.kyunghoon.eversolocoverscanner"
         minSdk = 23
         targetSdk = 28
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.1.1"
     }
-}
-
-dependencies {
-    implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.documentfile:documentfile:1.0.1")
 }
